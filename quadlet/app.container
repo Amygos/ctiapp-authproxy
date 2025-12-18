@@ -1,0 +1,16 @@
+[Container]
+ContainerName=app
+EnvironmentFile=/home/app/.env
+HealthCmd=["curl","-f","http://localhost:80/index.php/healthcheck"]
+HealthInterval=30s
+HealthRetries=3
+HealthStartPeriod=40s
+HealthTimeout=10s
+Image=ghcr.io/nethesis/ctiapp-authproxy:latest
+Network=app.network
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
