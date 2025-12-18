@@ -1,0 +1,11 @@
+# Podman Setup Role - Default Variables
+
+# Application settings
+app_user: app
+app_group: app
+app_home: "/home/{{ app_user }}"
+
+# Podman auto-update settings
+# Set to empty string or omit to use system default (daily)
+# Examples: "*:0/5" (every 5 minutes), "hourly", "daily", "weekly"
+podman_autoupdate_interval: ""

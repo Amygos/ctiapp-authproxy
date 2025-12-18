@@ -1,0 +1,185 @@
+# Host Setup Role - Main Tasks
+---
+- name: Install podman and related packages
+  ansible.builtin.dnf:
+    name:
+      - podman
+      - slirp4netns
+      - fuse-overlayfs
+      - container-selinux
+    state: present
+    update_cache: true
+
+- name: Configure podman registries
+  ansible.builtin.copy:
+    dest: /etc/containers/registries.conf
+    content: |
+      unqualified-search-registries = ["docker.io", "quay.io"]
+
+      [[registry]]
+      location = "docker.io"
+      insecure = false
+    mode: '0644'
+
+- name: Configure privileged ports for rootless containers
+  block:
+    - name: Set unprivileged port start to 23
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_unprivileged_port_start
+        value: "23"
+        state: present
+        sysctl_set: true
+        reload: true
+
+- name: Create application user and group
+  block:
+    - name: Create application group
+      ansible.builtin.group:
+        name: "{{ app_group }}"
+        state: present
+
+    - name: Create application user
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        group: "{{ app_group }}"
+        groups: "systemd-journal"
+        home: "{{ app_home }}"
+        append: true
+        shell: /bin/bash
+        create_home: true
+        system: true
+        comment: "CTI App Auth Proxy Service User"
+
+- name: Get application user UID
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ app_user }}"
+  register: app_user_info
+  failed_when: false
+  check_mode: false
+
+- name: Set user UID fact
+  ansible.builtin.set_fact:
+    app_user_uid: "{{ app_user_info.ansible_facts.getent_passwd[app_user][1] if app_user_info.ansible_facts.getent_passwd is defined else '1000' }}"
+
+- name: Enable lingering for user (allow services to run without login)
+  ansible.builtin.command:
+    cmd: "loginctl enable-linger {{ app_user }}"
+
+- name: Start user systemd instance
+  ansible.builtin.systemd:
+    name: user@{{ app_user_uid }}.service
+    state: started
+    enabled: true
+  when:
+    - app_user_uid is defined
+    - app_user_uid != '1000'
+    - not ansible_check_mode
+
+- name: Configure user environment variables in .bashrc
+  ansible.builtin.blockinfile:
+    path: "{{ app_home }}/.bashrc"
+    block: |
+      # XDG and D-Bus environment variables for systemd user services
+      export XDG_RUNTIME_DIR="/run/user/$UID"
+      export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - User environment"
+    create: true
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0644'
+
+- name: Create required directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0755'
+  loop:
+    - "{{ app_home }}/quadlet"
+    - "{{ app_home }}/.config"
+    - "{{ app_home }}/.config/systemd"
+    - "{{ app_home }}/.config/systemd/user"
+    - "{{ app_home }}/.config/containers"
+    - "{{ app_home }}/.config/containers/systemd"
+
+- name: Configure subuid and subgid for rootless podman
+  block:
+    - name: Ensure subuid exists
+      ansible.builtin.lineinfile:
+        path: /etc/subuid
+        line: "{{ app_user }}:100000:65536"
+        create: true
+        mode: '0644'
+
+    - name: Ensure subgid exists
+      ansible.builtin.lineinfile:
+        path: /etc/subgid
+        line: "{{ app_group }}:100000:65536"
+        create: true
+        mode: '0644'
+
+- name: Configure podman auto-update for user
+  block:
+    - name: Create systemd user timer override directory
+      ansible.builtin.file:
+        path: "{{ app_home }}/.config/systemd/user/podman-auto-update.timer.d"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0755'
+      when: podman_autoupdate_interval | length > 0
+
+    - name: Configure auto-update timer interval
+      ansible.builtin.copy:
+        dest: "{{ app_home }}/.config/systemd/user/podman-auto-update.timer.d/override.conf"
+        content: |
+          [Timer]
+          OnCalendar=
+          OnCalendar={{ podman_autoupdate_interval }}
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0644'
+      when: podman_autoupdate_interval | length > 0
+
+    - name: Remove timer override if using system default
+      ansible.builtin.file:
+        path: "{{ app_home }}/.config/systemd/user/podman-auto-update.timer.d"
+        state: absent
+      when: podman_autoupdate_interval | length == 0
+
+    - name: Reload systemd user daemon for timer changes
+      become: true
+      become_user: "{{ app_user }}"
+      ansible.builtin.systemd:
+        daemon_reload: true
+        scope: user
+      when: 
+        - app_user_uid is defined
+        - app_user_uid != '1000'
+        - not ansible_check_mode
+
+    - name: Enable podman-auto-update.timer for user
+      become: true
+      become_user: "{{ app_user }}"
+      ansible.builtin.systemd:
+        name: podman-auto-update.timer
+        enabled: true
+        state: started
+        scope: user
+      when:
+        - app_user_uid is defined
+        - app_user_uid != '1000'
+        - not ansible_check_mode
+
+    - name: Configure auto-update policy
+      ansible.builtin.copy:
+        dest: "{{ app_home }}/.config/containers/containers.conf"
+        content: |
+          [engine]
+          # Auto-update policy
+          auto_update = "registry"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0644'

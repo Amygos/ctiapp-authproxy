@@ -1,0 +1,20 @@
+# CTI App Deploy Role - Default Variables
+
+# Application settings
+app_name: "app"
+app_user: app
+app_group: app
+app_home: "/home/{{ app_user }}"
+
+# Quadlet configuration
+quadlet_source_dir: "../quadlet"
+
+# Network settings
+http_port: 80
+https_port: 443
+
+# Traefik settings
+traefik_hostname: "ctiapp.local"
+
+# Firewall settings
+enable_firewall: true

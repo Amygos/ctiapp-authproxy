@@ -1,0 +1,47 @@
+# App Deployment Playbook
+---
+- name: Deploy App with Quadlet to Rocky Linux
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    app_user: app
+    app_group: app
+    quadlet_source_dir: "../quadlet"
+    app_home: "/home/{{ app_user }}"
+
+  pre_tasks:
+    - name: Check if Rocky Linux
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Rocky"
+        fail_msg: "This playbook is designed for Rocky Linux"
+        success_msg: "Running on Rocky Linux {{ ansible_distribution_version }}"
+
+    - name: Update system packages
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+        update_cache: true
+      tags: [system, packages]
+
+  roles:
+    - role: host_setup
+      tags: [podman]
+
+    - role: app_deploy
+      tags: [deploy]
+
+  post_tasks:
+    - name: Display deployment information
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - "CTI App Auth Proxy Deployment Complete!"
+          - "========================================"
+          - "Application: {{ app_name }}"
+          - "User: {{ app_user }}"
+          - "Service Status: systemctl --user status pod-ctiapp.service"
+          - "View Logs: journalctl --user -u app.service -f"
+          - "========================================"

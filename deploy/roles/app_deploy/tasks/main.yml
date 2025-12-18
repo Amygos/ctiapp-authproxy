@@ -1,0 +1,170 @@
+# App Deployment Role - Main Tasks
+---
+- name: Create required directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0755'
+  loop:
+    - "{{ app_home }}/traefik"
+    - "{{ app_home }}/.config/environment.d"
+
+- name: Read Traefik configuration from repository
+  ansible.builtin.slurp:
+    src: "{{ playbook_dir }}/../traefik/config.yml"
+  delegate_to: localhost
+  register: traefik_config_raw
+  become: false
+
+- name: Parse Traefik configuration
+  ansible.builtin.set_fact:
+    traefik_config: "{{ traefik_config_raw.content | b64decode | from_yaml }}"
+
+- name: Inject hostname into Traefik configuration
+  ansible.builtin.set_fact:
+    traefik_config: "{{ traefik_config | combine({'tls': {'stores': {'default': {'defaultGeneratedCert': {'domain': {'main': traefik_hostname}}}}}}, recursive=true) }}"
+
+- name: Deploy Traefik configuration with injected hostname
+  ansible.builtin.copy:
+    content: "{{ traefik_config | to_nice_yaml(indent=2) }}"
+    dest: "{{ app_home }}/traefik/config.yml"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0644'
+
+- name: Set SELinux context for Traefik configuration directory
+  community.general.sefcontext:
+    target: "{{ app_home }}/traefik(/.*)?"
+    setype: container_file_t
+    state: present
+  when: ansible_selinux.status == "enabled"
+
+- name: Apply SELinux context to Traefik configuration
+  ansible.builtin.command:
+    cmd: "restorecon -Rv {{ app_home }}/traefik"
+  when: ansible_selinux.status == "enabled"
+  changed_when: false
+
+- name: Copy quadlet files from local directory
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/{{ quadlet_source_dir }}/"
+    dest: "{{ app_home }}/.config/containers/systemd/"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0644'
+
+- name: Ensure quadlet override directory exists
+  ansible.builtin.file:
+    path: "{{ app_home }}/.config/containers/systemd/app.container.d"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0755'
+
+- name: Copy quadlet override files
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/{{ quadlet_source_dir }}/app.container.d/"
+    dest: "{{ app_home }}/.config/containers/systemd/app.container.d/"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0644'
+
+- name: Copy .env file from repository
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../.env"
+    dest: "{{ app_home }}/.env"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0644'
+
+- name: Reload systemd user daemon
+  become: true
+  become_user: "{{ app_user }}"
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ app_user_uid }}"
+
+- name: Terminate user session to restart all services
+  ansible.builtin.command:
+    cmd: "loginctl terminate-user {{ app_user }}"
+  changed_when: true
+  ignore_errors: true
+
+- name: Re-enable lingering for user (restarts user services)
+  ansible.builtin.command:
+    cmd: "loginctl enable-linger {{ app_user }}"
+  changed_when: true
+
+- name: Wait for user runtime directory to be ready
+  ansible.builtin.wait_for:
+    path: "/run/user/{{ app_user_uid }}"
+    state: present
+    timeout: 30
+
+- name: Run podman auto-update to check for image updates
+  become: true
+  become_user: "{{ app_user }}"
+  ansible.builtin.command:
+    cmd: podman auto-update
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ app_user_uid }}"
+  register: podman_autoupdate_result
+  changed_when: "'Updated' in podman_autoupdate_result.stdout"
+  failed_when: false
+
+- name: Display podman auto-update results
+  ansible.builtin.debug:
+    msg: "{{ podman_autoupdate_result.stdout_lines }}"
+  when: podman_autoupdate_result.stdout_lines is defined
+
+- name: Configure firewall
+  block:
+    - name: Install firewalld
+      ansible.builtin.dnf:
+        name: firewalld
+        state: present
+
+    - name: Enable and start firewalld
+      ansible.builtin.systemd:
+        name: firewalld
+        state: started
+        enabled: true
+      when: not ansible_check_mode
+
+    - name: Open HTTP port
+      ansible.posix.firewalld:
+        port: "{{ http_port }}/tcp"
+        permanent: true
+        state: enabled
+        immediate: true
+
+    - name: Open HTTPS port
+      ansible.posix.firewalld:
+        port: "{{ https_port }}/tcp"
+        permanent: true
+        state: enabled
+        immediate: true
+  when: enable_firewall | default(true) | bool
+
+- name: Wait for services to be ready
+  ansible.builtin.wait_for:
+    port: "{{ item }}"
+    host: 127.0.0.1
+    timeout: 60
+  loop:
+    - "{{ http_port }}"
+    - "{{ https_port }}"
+
+- name: Verify deployment
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ http_port }}/index.php/healthcheck"
+    method: GET
+    status_code: [200, 201]
+  register: health_check
+  retries: 3
+  delay: 10
+  until: health_check.status in [200, 201]
