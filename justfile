@@ -184,7 +184,7 @@ nc := '\033[0m'
 @quadlet-generate:
     printf "{{blue}}Generating Quadlet files from {{compose_file}}...{{nc}}\n"
     mkdir -p {{quadlet_dir}}
-    podman-compose -f {{compose_file}} -f {{compose_prod_file}} config | podlet -f {{quadlet_dir}} --install --absolute-host-paths /home/app compose
+    podman-compose -f {{compose_file}} -f {{compose_prod_file}} config | podlet --overwrite -f {{quadlet_dir}} --install --absolute-host-paths /home/app compose
     printf "{{green}}Quadlet files generated in {{quadlet_dir}}/{{nc}}\n"
     ls -la {{quadlet_dir}}/
 
