@@ -1,5 +1,7 @@
 # App - Deployment Justfile
 
+set dotenv-load
+
 # Variables
 compose_file := "compose.yaml"
 compose_prod_file := "compose.prod.yaml"
@@ -8,6 +10,7 @@ image_name := "ctiapp-authproxy"
 image_tag := "latest"
 dockerfile := "Dockerfile"
 registry := "ghcr.io/nethesis"
+ansible_extra_args := ""
 
 # Colors for output
 blue := '\033[0;34m'
@@ -231,3 +234,13 @@ nc := '\033[0m'
 # Run all pre-deployment checks
 @deploy-check: check quadlet-generate ansible-check
     printf "{{green}}All checks passed! Ready for deployment.{{nc}}\n"
+# Deploy application using Ansible
+@deploy:
+    #!/usr/bin/env bash
+    printf "{{blue}}Starting deployment...{{nc}}\n"
+    # Check for APP_HOSTNAME environment variable
+    if [ -z "$APP_HOSTNAME" ]; then
+        printf "{{yellow}}APP_HOSTNAME environment variable not set!{{nc}}\n"
+        exit 1
+    fi
+    ansible-playbook -i root@"$APP_HOSTNAME", deploy/deploy.yml -e "traefik_hostname=$APP_HOSTNAME" {{ansible_extra_args}}
